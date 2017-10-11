@@ -53,11 +53,24 @@ bool replay_ended = false;
 #include <map>
 #include <set>
 
+target_ulong last_virt_addr = 0;
+
+int mem_write_callback(CPUState *env, target_ulong pc, target_ulong addr, target_ulong size, void *buf) {
+    last_virt_addr = addr;
+    return 0;
+}
+
+int mem_read_callback(CPUState *env, target_ulong pc, target_ulong addr, target_ulong size, void *buf) {
+    last_virt_addr = addr;
+    return 0;
+}
+
 // map from asid -> pc
 std::map<uint64_t,std::set<uint64_t>> tainted_instr;
 
 target_ulong last_asid = 0;
 target_ulong last_pc = 0;
+target_ulong memblock_count = 0;
 
 void taint_change(Addr a, uint64_t size) {
     if (replay_ended) return;
@@ -98,6 +111,23 @@ void taint_change(Addr a, uint64_t size) {
                 }
                 Panda__LogEntry ple = PANDA__LOG_ENTRY__INIT;
                 ple.tainted_instr = ti;
+
+		        ple.has_taint_label_physical_addr = 1;
+	        	ple.has_taint_label_virtual_addr = 1;
+    	    	uint32_t this_addr = 0;
+		        if (a.typ == MADDR)
+		            this_addr = a.val.ma;
+	    	    ple.taint_label_physical_addr = this_addr;
+
+    	        if (panda_virt_to_phys(env, last_virt_addr) == this_addr) {
+    		        ple.taint_label_virtual_addr = last_virt_addr;
+                    memblock_count = 0;
+                }
+                else if (panda_virt_to_phys(env, last_virt_addr + ++memblock_count) == this_addr)
+                    ple.taint_label_virtual_addr = last_virt_addr + memblock_count;
+	            else
+    	    	    ple.taint_label_virtual_addr = 0;
+
                 if (pandalog) {
                     pandalog_write_entry(&ple);
                 }
@@ -108,7 +138,7 @@ void taint_change(Addr a, uint64_t size) {
                 free(ti);
             }
             else {
-                printf ("  pc = 0x%" PRIx64 "\n", (uint64_t) pc);
+                //printf ("  pc = 0x%" PRIx64 "\n", (uint64_t) pc);
             }
         }
         if (asid != last_asid) {
@@ -146,6 +176,16 @@ bool init_plugin(void *self) {
     // this tells taint system to enable extra instrumentation
     // so it can tell when the taint state changes
     taint2_track_taint_state();
+
+    // Enable memory logging
+    panda_enable_memcb();
+    
+    panda_cb pcb;
+    pcb.virt_mem_before_write = mem_write_callback;
+    panda_register_callback(self, PANDA_CB_VIRT_MEM_BEFORE_WRITE, pcb);
+    pcb.virt_mem_after_read = mem_read_callback;
+    panda_register_callback(self, PANDA_CB_VIRT_MEM_AFTER_READ, pcb);
+
     return true;
 }
 
